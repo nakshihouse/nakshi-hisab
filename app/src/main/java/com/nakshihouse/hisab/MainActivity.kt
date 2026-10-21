@@ -474,15 +474,6 @@ class MainActivity : Activity() {
         }
     }
 
-    @Suppress("DEPRECATION") // framework onBackPressed still works on targetSdk 34.
-    override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         if (::webView.isInitialized) {
