@@ -97,14 +97,35 @@ class MainActivity : Activity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             loadWithOverviewMode = false
-            useWideViewPort = true
+            // Narrow viewport: the host page (Apps Script) declares no
+            // viewport of its own; a wide default would leave room to pan.
+            useWideViewPort = false
             setSupportZoom(false)
             builtInZoomControls = false
             displayZoomControls = false
             mediaPlaybackRequiresUserGesture = false
         }
 
+        // Pin the horizontal axis: this is a fixed phone-width UI, so any
+        // sideways pan of the host page is a bug — force scrollX back to 0.
+        webView.isHorizontalScrollBarEnabled = false
+        webView.setOnScrollChangeListener { v, sx, sy, _, _ ->
+            if (sx != 0) v.scrollTo(0, sy)
+        }
+
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String?) {
+                // Pin the HOST document too (Apps Script wraps the app in
+                // its own page) so it cannot pan sideways around the app.
+                view.evaluateJavascript(
+                    "(function(){try{var d=document;" +
+                        "d.documentElement.style.setProperty('overflow-x','hidden','important');" +
+                        "if(d.body){d.body.style.setProperty('overflow-x','hidden','important');}" +
+                        "}catch(e){}})();",
+                    null
+                )
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest
