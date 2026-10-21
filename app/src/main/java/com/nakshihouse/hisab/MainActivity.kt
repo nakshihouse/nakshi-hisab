@@ -658,15 +658,17 @@ class MainActivity : Activity() {
             webView.evaluateJavascript(
                 "window.hisabHandleBack ? String(hisabHandleBack()) : 'false'"
             ) { result ->
-                if (result != "\"true\"") {
-                    @Suppress("DEPRECATION")
-                    super.onBackPressed()
-                }
+                if (result != "\"true\"") exitApp()
             }
         } else {
-            @Suppress("DEPRECATION")
-            super.onBackPressed()
+            exitApp()
         }
+    }
+
+    // 'super' cannot be called from inside a lambda, hence this helper.
+    private fun exitApp() {
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
     }
 
     override fun onDestroy() {
