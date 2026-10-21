@@ -2,10 +2,13 @@ package com.nakshihouse.hisab
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.ProgressDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
@@ -17,6 +20,11 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.Toast
+import androidx.core.content.FileProvider
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * নকশি হাউস হিসাব — native Android wrapper around the Apps Script web app.
@@ -27,6 +35,9 @@ import android.widget.Toast
  *   so one APK can serve many deployments without a rebuild.
  * - Zoom is disabled and overview mode is off: the page is a fixed,
  *   phone-width app UI — no pinch zoom, no sideways pan.
+ * - Self-update: on launch the app checks this repo's GitHub Releases for a
+ *   newer versionCode; if one exists it offers a one-tap download + install
+ *   (no Play Store). Release tags look like "v<versionCode>-<versionName>".
  * - JavascriptInterface "HisabApp" bridges voice input: Android WebView has
  *   NO Web Speech API, so the page calls HisabApp.startVoice() and the
  *   native side returns the transcript via onNativeVoiceResult(text).
@@ -41,6 +52,8 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_FILE_CHOOSER = 1001
         private const val REQ_VOICE = 1002
+        private const val UPDATE_API_URL =
+            "https://api.github.com/repos/nakshihouse/nakshi-hisab/releases/latest"
     }
 
     // Shown if the web app URL was never pasted into strings.xml.
@@ -150,6 +163,142 @@ class MainActivity : Activity() {
                 webView.loadDataWithBaseURL(null, setupHtml, "text/html", "utf-8", null)
             }
         }
+        checkForUpdate()
+    }
+
+    // ============================ SELF-UPDATE ============================
+    // Source of truth: GitHub Releases of the app-shell repo. The release
+    // workflow publishes tag "v<versionCode>-<versionName>" plus the signed
+    // APK as an asset named nakshi-hisab.apk.
+
+    private fun installedVersionCode(): Long {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode
+        else @Suppress("DEPRECATION") info.versionCode.toLong()
+    }
+
+    private fun checkForUpdate() {
+        Thread {
+            try {
+                val conn = URL(UPDATE_API_URL).openConnection() as HttpURLConnection
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                conn.setRequestProperty("Accept", "application/vnd.github+json")
+                conn.setRequestProperty("User-Agent", "NakshiHisabApp")
+                if (conn.responseCode != 200) return@Thread
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                val rel = JSONObject(body)
+                val tag = rel.optString("tag_name") // e.g. v2-1.1
+                val remoteVc = tag.removePrefix("v").substringBefore("-").toLongOrNull()
+                    ?: return@Thread
+                if (remoteVc <= installedVersionCode()) return@Thread
+                val remoteVn = tag.substringAfter("-", "")
+                val assets = rel.optJSONArray("assets") ?: return@Thread
+                var apkUrl: String? = null
+                for (i in 0 until assets.length()) {
+                    val a = assets.getJSONObject(i)
+                    if (a.optString("name").endsWith(".apk")) {
+                        apkUrl = a.optString("browser_download_url")
+                        break
+                    }
+                }
+                val url = apkUrl ?: return@Thread
+                runOnUiThread { promptUpdate(remoteVn, url) }
+            } catch (e: Exception) {
+                // Offline or GitHub unreachable — updates are best-effort.
+            }
+        }.start()
+    }
+
+    private fun promptUpdate(versionName: String, apkUrl: String) {
+        if (isFinishing || isDestroyed) return
+        AlertDialog.Builder(this)
+            .setTitle("নতুন আপডেট এসেছে")
+            .setMessage("হিসাব অ্যাপের নতুন সংস্করণ (v$versionName) তৈরি। এখন আপডেট করবেন?")
+            .setPositiveButton("আপডেট করুন") { _, _ -> downloadUpdate(apkUrl) }
+            .setNegativeButton("পরে", null)
+            .show()
+    }
+
+    @Suppress("DEPRECATION") // ProgressDialog: zero-dependency progress UI.
+    private fun downloadUpdate(apkUrl: String) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            Toast.makeText(
+                this,
+                "আপডেট বসাতে এই অ্যাপকে অনুমতি দিন",
+                Toast.LENGTH_LONG
+            ).show()
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                )
+            )
+            return
+        }
+        val progress = ProgressDialog(this).apply {
+            setMessage("আপডেট ডাউনলোড হচ্ছে...")
+            setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
+            isIndeterminate = true
+            setCancelable(false)
+            show()
+        }
+        Thread {
+            try {
+                val dir = File(cacheDir, "updates").apply { mkdirs() }
+                val outFile = File(dir, "nakshi-hisab-update.apk")
+                val conn = URL(apkUrl).openConnection() as HttpURLConnection
+                conn.connectTimeout = 20000
+                conn.readTimeout = 60000
+                conn.setRequestProperty("User-Agent", "NakshiHisabApp")
+                conn.instanceFollowRedirects = true
+                val total = conn.contentLength
+                conn.inputStream.use { input ->
+                    outFile.outputStream().use { output ->
+                        val buf = ByteArray(64 * 1024)
+                        var done = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            output.write(buf, 0, n)
+                            done += n
+                            if (total > 0) {
+                                val pct = (done * 100 / total).toInt()
+                                runOnUiThread {
+                                    progress.isIndeterminate = false
+                                    progress.max = 100
+                                    progress.progress = pct
+                                }
+                            }
+                        }
+                    }
+                }
+                runOnUiThread {
+                    progress.dismiss()
+                    installUpdate(outFile)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    progress.dismiss()
+                    Toast.makeText(
+                        this,
+                        "ডাউনলোড হয়নি — নেট দেখে আবার চেষ্টা করুন",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun installUpdate(apkFile: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", apkFile)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+            )
+        }
+        startActivity(intent)
     }
 
     private fun prefs() = getSharedPreferences("hisab", MODE_PRIVATE)
