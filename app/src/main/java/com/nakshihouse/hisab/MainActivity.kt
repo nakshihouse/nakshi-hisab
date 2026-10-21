@@ -1,10 +1,16 @@
 package com.nakshihouse.hisab
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.ProgressDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
+import android.util.Base64
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -49,9 +55,19 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
+    // ---- native voice recorder state (segments pushed to the page) ----
+    private var recorder: MediaRecorder? = null
+    private var recording = false
+    private var pendingRecordStart = false
+    private var segmentIndex = 0
+    private val recHandler = Handler(Looper.getMainLooper())
+    private var segmentFile: File? = null
+
     companion object {
         private const val REQ_FILE_CHOOSER = 1001
         private const val REQ_VOICE = 1002
+        private const val REQ_MIC = 1003
+        private const val SEGMENT_MS = 12_000L
         private const val UPDATE_API_URL =
             "https://api.github.com/repos/nakshihouse/nakshi-hisab/releases/latest"
     }
@@ -394,6 +410,24 @@ class MainActivity : Activity() {
                 }
             }
         }
+
+        // In-app voice recording: the shell records natively (the Apps
+        // Script iframe cannot use the microphone) and pushes ~12s audio
+        // segments to the page, which sends them to Gemini for live text.
+        @JavascriptInterface
+        fun startRecorder() {
+            runOnUiThread { bridgeStartRecorder() }
+        }
+
+        @JavascriptInterface
+        fun stopRecorder() {
+            runOnUiThread { bridgeStopRecorder() }
+        }
+
+        @JavascriptInterface
+        fun cancelRecorder() {
+            runOnUiThread { bridgeCancelRecorder() }
+        }
     }
 
     @Suppress("DEPRECATION") // startActivityForResult is the zero-dependency path (no AndroidX).
@@ -456,7 +490,200 @@ class MainActivity : Activity() {
         }
     }
 
+    // ==================== native voice recorder ====================
+    private fun js(script: String) {
+        runOnUiThread {
+            if (::webView.isInitialized && !isFinishing) {
+                webView.evaluateJavascript(script, null)
+            }
+        }
+    }
+
+    private fun voiceDir(): File {
+        val dir = File(cacheDir, "voice")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun bridgeStartRecorder() {
+        if (recording) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingRecordStart = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
+            return
+        }
+        beginRecording()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_MIC && pendingRecordStart) {
+            pendingRecordStart = false
+            if (grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            ) {
+                beginRecording()
+            } else {
+                js("onRecorderError('permission')")
+            }
+        }
+    }
+
+    private val rotateRunnable = object : Runnable {
+        override fun run() {
+            if (!recording) return
+            finishSegment(push = true)
+            startSegment()
+            if (recording) recHandler.postDelayed(this, SEGMENT_MS)
+        }
+    }
+
+    private val levelRunnable = object : Runnable {
+        override fun run() {
+            if (!recording) return
+            val amp = try {
+                recorder?.maxAmplitude ?: 0
+            } catch (e: Exception) {
+                0
+            }
+            val level = Math.pow(amp / 32767.0, 0.6).coerceIn(0.0, 1.0)
+            js("onVoiceLevel(" + String.format(java.util.Locale.US, "%.3f", level) + ")")
+            recHandler.postDelayed(this, 250)
+        }
+    }
+
+    private fun beginRecording() {
+        voiceDir().listFiles()?.forEach { it.delete() }
+        segmentIndex = 0
+        recording = true
+        startSegment()
+        if (!recording) return // startSegment already reported the error
+        js("onRecorderStarted()")
+        recHandler.postDelayed(rotateRunnable, SEGMENT_MS)
+        recHandler.post(levelRunnable)
+    }
+
+    private fun startSegment() {
+        segmentFile = File(voiceDir(), "seg_" + segmentIndex + ".m4a")
+        segmentIndex++
+        val rec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(this)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
+        }
+        try {
+            rec.setAudioSource(MediaRecorder.AudioSource.MIC)
+            rec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            rec.setAudioChannels(1)
+            rec.setAudioSamplingRate(16000)
+            rec.setAudioEncodingBitRate(64000)
+            rec.setOutputFile(segmentFile!!.absolutePath)
+            rec.prepare()
+            rec.start()
+            recorder = rec
+        } catch (e: Exception) {
+            try {
+                rec.release()
+            } catch (ignored: Exception) {
+            }
+            recorder = null
+            recording = false
+            js("onRecorderError('failed')")
+        }
+    }
+
+    /** Stops the current segment; pushes it to the page when asked. */
+    private fun finishSegment(push: Boolean) {
+        val rec = recorder ?: return
+        recorder = null
+        try {
+            rec.stop()
+        } catch (ignored: Exception) {
+            // Too short / no valid data — the segment is dropped below.
+        }
+        try {
+            rec.release()
+        } catch (ignored: Exception) {
+        }
+        val f = segmentFile
+        segmentFile = null
+        if (f != null && f.exists()) {
+            if (push && f.length() > 1500) {
+                try {
+                    val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
+                    js("onVoiceSegment('" + b64 + "','audio/mp4')")
+                } catch (ignored: Exception) {
+                }
+            }
+            f.delete()
+        }
+    }
+
+    private fun bridgeStopRecorder() {
+        if (!recording) {
+            js("onRecorderStopped()")
+            return
+        }
+        recording = false
+        recHandler.removeCallbacks(rotateRunnable)
+        recHandler.removeCallbacks(levelRunnable)
+        finishSegment(push = true)
+        js("onRecorderStopped()")
+    }
+
+    private fun bridgeCancelRecorder() {
+        recording = false
+        recHandler.removeCallbacks(rotateRunnable)
+        recHandler.removeCallbacks(levelRunnable)
+        finishSegment(push = false)
+        voiceDir().listFiles()?.forEach { it.delete() }
+        js("onRecorderCancelled()")
+    }
+
+    // ==================== back button ====================
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        // Let the page handle it first: close an open sheet/settings, go
+        // back to the chat tab, or cancel a recording. Exit only when the
+        // page says it has nothing to handle.
+        if (::webView.isInitialized) {
+            webView.evaluateJavascript(
+                "window.hisabHandleBack ? String(hisabHandleBack()) : 'false'"
+            ) { result ->
+                if (result != "\"true\"") {
+                    @Suppress("DEPRECATION")
+                    super.onBackPressed()
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            super.onBackPressed()
+        }
+    }
+
     override fun onDestroy() {
+        if (recording) {
+            recording = false
+            recHandler.removeCallbacks(rotateRunnable)
+            recHandler.removeCallbacks(levelRunnable)
+            try {
+                recorder?.stop()
+            } catch (ignored: Exception) {
+            }
+            try {
+                recorder?.release()
+            } catch (ignored: Exception) {
+            }
+            recorder = null
+        }
         if (::webView.isInitialized) {
             webView.destroy()
         }

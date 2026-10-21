@@ -3,6 +3,8 @@
 
     <!-- Needed to load the Apps Script web app and call the Gemini API -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Needed for in-app voice notes (native recorder -> Gemini transcription) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Needed to install self-updates downloaded from GitHub Releases -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
