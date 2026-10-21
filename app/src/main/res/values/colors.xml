@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Nakshi House brand palette (matches the web app) -->
+    <color name="green">#2F6B45</color>
+    <color name="green_dark">#1F4D35</color>
+    <color name="gold">#B8860B</color>
+    <color name="bg">#FAF7F2</color>
+    <color name="white">#FFFFFF</color>
+    <color name="ink">#1C1C1C</color>
+</resources>

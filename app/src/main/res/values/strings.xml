@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">নকশি হাউস হিসাব</string>
+    <!-- Short name shown under the home-screen icon -->
+    <string name="launcher_name">হিসাব</string>
+    <!-- ================================================================
+         WEB APP URL — এখানে Deploy করা Apps Script Web app-এর URL বসান।
+         Apps Script এডিটর → Deploy → New deployment → Web app-এর পর
+         "Web app URL" কপি করে নিচের PASTE_WEB_APP_URL_HERE-এর জায়গায়
+         পেস্ট করুন, তারপর APK বিল্ড করুন।
+         ================================================================ -->
+    <string name="web_app_url">https://script.google.com/macros/s/AKfycbx1SAb1YMQWjSTUjguX3sFGTsdL1JZHrgD_dj9fZoBR8zic4cBwihxicYBUQEd68E4/exec</string>
+    <string name="voice_prompt">বলুন…</string>
+</resources>

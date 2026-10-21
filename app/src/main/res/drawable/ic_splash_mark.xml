@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- White ledger-book mark for the launch splash (transparent background;
+     the green comes from splash_bg's layer below). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="72dp"
+    android:height="72dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,34 C47,30 39,29 33,31 L33,77 C39,75 47,76 54,80 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,34 C61,30 69,29 75,31 L75,77 C69,75 61,76 54,80 Z" />
+    <path
+        android:strokeColor="#1F4D35"
+        android:strokeWidth="2"
+        android:pathData="M54,34 L54,80" />
+    <path
+        android:strokeColor="#B8860B"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M38,45 L49,47 M38,53 L49,55 M38,61 L49,63" />
+    <path
+        android:strokeColor="#B8860B"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M59,47 L70,45 M59,55 L70,53 M59,63 L70,61" />
+</vector>
