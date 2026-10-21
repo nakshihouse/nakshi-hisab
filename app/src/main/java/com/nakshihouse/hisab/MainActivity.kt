@@ -55,6 +55,10 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
+    // ---- self-update state ----
+    private var lastCheckMs = 0L
+    private var promptedVc = -1L
+
     // ---- native voice recorder state (segments pushed to the page) ----
     private var recorder: MediaRecorder? = null
     private var recording = false
@@ -214,7 +218,14 @@ class MainActivity : Activity() {
         else @Suppress("DEPRECATION") info.versionCode.toLong()
     }
 
-    private fun checkForUpdate() {
+    private fun checkForUpdate(manual: Boolean = false) {
+        // Automatic checks are throttled: the app often stays alive in
+        // recents for days, and onCreate alone would never re-check (that
+        // is why users missed the v1.2/v1.3 prompts). onResume re-checks
+        // at most every 30 minutes; a manual check always runs.
+        val now = System.currentTimeMillis()
+        if (!manual && now - lastCheckMs < 30 * 60 * 1000L) return
+        lastCheckMs = now
         Thread {
             try {
                 val conn = URL(UPDATE_API_URL).openConnection() as HttpURLConnection
@@ -222,13 +233,21 @@ class MainActivity : Activity() {
                 conn.readTimeout = 15000
                 conn.setRequestProperty("Accept", "application/vnd.github+json")
                 conn.setRequestProperty("User-Agent", "NakshiHisabApp")
-                if (conn.responseCode != 200) return@Thread
+                if (conn.responseCode != 200) {
+                    if (manual) toastOnUi("এখন আপডেট যাচাই করা যাচ্ছে না — নেট চেক করে আবার চেষ্টা করুন")
+                    return@Thread
+                }
                 val body = conn.inputStream.bufferedReader().use { it.readText() }
                 val rel = JSONObject(body)
                 val tag = rel.optString("tag_name") // e.g. v2-1.1
                 val remoteVc = tag.removePrefix("v").substringBefore("-").toLongOrNull()
                     ?: return@Thread
-                if (remoteVc <= installedVersionCode()) return@Thread
+                if (remoteVc <= installedVersionCode()) {
+                    if (manual) toastOnUi("আপনি সর্বশেষ সংস্করণেই আছেন")
+                    return@Thread
+                }
+                if (remoteVc == promptedVc && !manual) return@Thread
+                promptedVc = remoteVc
                 val remoteVn = tag.substringAfter("-", "")
                 val assets = rel.optJSONArray("assets") ?: return@Thread
                 var apkUrl: String? = null
@@ -243,8 +262,20 @@ class MainActivity : Activity() {
                 runOnUiThread { promptUpdate(remoteVn, url) }
             } catch (e: Exception) {
                 // Offline or GitHub unreachable — updates are best-effort.
+                if (manual) toastOnUi("এখন আপডেট যাচাই করা যাচ্ছে না — নেট চেক করে আবার চেষ্টা করুন")
             }
         }.start()
+    }
+
+    private fun toastOnUi(msg: String) {
+        runOnUiThread {
+            if (!isFinishing) Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkForUpdate()
     }
 
     private fun promptUpdate(versionName: String, apkUrl: String) {
@@ -409,6 +440,19 @@ class MainActivity : Activity() {
                     webView.evaluateJavascript("onNativeVoiceError()", null)
                 }
             }
+        }
+
+        @JavascriptInterface
+        fun checkUpdateNow() {
+            runOnUiThread { checkForUpdate(manual = true) }
+        }
+
+        @JavascriptInterface
+        fun getVersion(): String {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            @Suppress("DEPRECATION")
+            val vc = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+            return info.versionName + " (" + vc + ")"
         }
 
         // In-app voice recording: the shell records natively (the Apps
