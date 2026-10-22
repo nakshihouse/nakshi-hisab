@@ -115,6 +115,10 @@ class MainActivity : Activity() {
         webView = findViewById(R.id.webview)
         webView.settings.apply {
             javaScriptEnabled = true
+            // The web UI is the product and updates several times a day via
+            // the Apps Script deployment; a stale WebView cache made fixes
+            // look "not delivered". Always load the page fresh.
+            cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
             domStorageEnabled = true
             loadWithOverviewMode = false
             // Narrow viewport: the host page (Apps Script) declares no
