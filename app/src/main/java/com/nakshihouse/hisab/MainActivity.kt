@@ -67,6 +67,19 @@ class MainActivity : Activity() {
     private val recHandler = Handler(Looper.getMainLooper())
     private var segmentFile: File? = null
 
+    // Voice data waits here for the page to POLL it via drainVoice(): the
+    // app page runs in a sandboxed cross-origin iframe inside the Apps
+    // Script host page, so evaluateJavascript (which reaches only the host
+    // document) can never call page functions like onVoiceSegment().
+    private val voiceLock = Any()
+    private val voiceSegments = mutableListOf<JSONObject>()
+    private val voiceTexts = mutableListOf<String>()
+    @Volatile private var voiceLevel = 0.0
+    @Volatile private var voiceStopped = false
+    @Volatile private var voiceCancelled = false
+    @Volatile private var voiceError: String? = null
+    @Volatile private var voiceStarted = false
+
     companion object {
         private const val REQ_FILE_CHOOSER = 1001
         private const val REQ_VOICE = 1002
@@ -115,10 +128,12 @@ class MainActivity : Activity() {
         webView = findViewById(R.id.webview)
         webView.settings.apply {
             javaScriptEnabled = true
-            // The web UI is the product and updates several times a day via
-            // the Apps Script deployment; a stale WebView cache made fixes
-            // look "not delivered". Always load the page fresh.
-            cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
+            // Google serves the Apps Script pages themselves with
+            // no-store headers, so the app UI is ALWAYS fetched fresh and
+            // web updates keep arriving instantly. The default cache mode
+            // only lets the WebView reuse Google's static framework files
+            // (host CSS/JS), which makes opening the app much faster.
+            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             domStorageEnabled = true
             loadWithOverviewMode = false
             // Narrow viewport: the host page (Apps Script) declares no
@@ -145,6 +160,9 @@ class MainActivity : Activity() {
                     "(function(){try{var d=document;" +
                         "d.documentElement.style.setProperty('overflow-x','hidden','important');" +
                         "if(d.body){d.body.style.setProperty('overflow-x','hidden','important');}" +
+                        "var st=d.createElement('style');st.id='nhHideBar';" +
+                        "st.textContent='#warning-bar-table tr:first-child{display:none!important}#warning{display:none!important}';" +
+                        "if(d.head){d.head.appendChild(st);}" +
                         "}catch(e){}})();",
                     null
                 )
@@ -441,7 +459,7 @@ class MainActivity : Activity() {
                 try {
                     startActivityForResult(intent, REQ_VOICE)
                 } catch (e: ActivityNotFoundException) {
-                    webView.evaluateJavascript("onNativeVoiceError()", null)
+                    voiceError = "failed"
                 }
             }
         }
@@ -476,6 +494,52 @@ class MainActivity : Activity() {
         fun cancelRecorder() {
             runOnUiThread { bridgeCancelRecorder() }
         }
+
+        // The page polls this while recording: it returns the finished
+        // audio segments (base64), any legacy speech texts, the live mic
+        // level and the stopped/cancelled/error state, then clears what
+        // was delivered. (The shell cannot push into the sandboxed
+        // iframe; polling is the reliable direction.)
+        @JavascriptInterface
+        fun drainVoice(): String {
+            val out = JSONObject()
+            synchronized(voiceLock) {
+                val arr = org.json.JSONArray()
+                for (sg in voiceSegments) arr.put(sg)
+                voiceSegments.clear()
+                out.put("segments", arr)
+                val tarr = org.json.JSONArray()
+                for (t in voiceTexts) tarr.put(t)
+                voiceTexts.clear()
+                out.put("error", voiceError ?: JSONObject.NULL)
+                voiceError = null
+                out.put("cancelled", voiceCancelled)
+                voiceCancelled = false
+            }
+            out.put("level", voiceLevel)
+            out.put("stopped", voiceStopped)
+            out.put("started", voiceStarted)
+            return out.toString()
+        }
+
+        @JavascriptInterface
+        fun resetVoice() {
+            synchronized(voiceLock) {
+                voiceSegments.clear()
+                voiceTexts.clear()
+                voiceError = null
+                voiceCancelled = false
+            }
+            voiceStopped = false
+            voiceStarted = false
+            voiceLevel = 0.0
+        }
+
+        // Called by the page when a back press was not handled in-page.
+        @JavascriptInterface
+        fun exitApp() {
+            runOnUiThread { finish() }
+        }
     }
 
     @Suppress("DEPRECATION") // startActivityForResult is the zero-dependency path (no AndroidX).
@@ -508,15 +572,9 @@ class MainActivity : Activity() {
                         .getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                         ?.firstOrNull()
                         .orEmpty()
-                    // Escape for safe injection into a single-quoted JS string.
-                    val escaped = text
-                        .replace("\\", "\\\\")
-                        .replace("'", "\\'")
-                        .replace("\n", "\\n")
-                        .replace("\r", "")
-                    webView.evaluateJavascript("onNativeVoiceResult('$escaped')", null)
+                    synchronized(voiceLock) { voiceTexts.add(text) }
                 } else {
-                    webView.evaluateJavascript("onNativeVoiceError()", null)
+                    voiceError = "failed"
                 }
             }
         }
@@ -569,7 +627,7 @@ class MainActivity : Activity() {
             ) {
                 beginRecording()
             } else {
-                js("onRecorderError('permission')")
+                voiceError = "permission"
             }
         }
     }
@@ -591,8 +649,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 0
             }
-            val level = Math.pow(amp / 32767.0, 0.6).coerceIn(0.0, 1.0)
-            js("onVoiceLevel(" + String.format(java.util.Locale.US, "%.3f", level) + ")")
+            voiceLevel = Math.pow(amp / 32767.0, 0.6).coerceIn(0.0, 1.0)
             recHandler.postDelayed(this, 250)
         }
     }
@@ -603,7 +660,7 @@ class MainActivity : Activity() {
         recording = true
         startSegment()
         if (!recording) return // startSegment already reported the error
-        js("onRecorderStarted()")
+        voiceStarted = true
         recHandler.postDelayed(rotateRunnable, SEGMENT_MS)
         recHandler.post(levelRunnable)
     }
@@ -635,7 +692,7 @@ class MainActivity : Activity() {
             }
             recorder = null
             recording = false
-            js("onRecorderError('failed')")
+            voiceError = "failed"
         }
     }
 
@@ -658,7 +715,10 @@ class MainActivity : Activity() {
             if (push && f.length() > 1500) {
                 try {
                     val b64 = Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
-                    js("onVoiceSegment('" + b64 + "','audio/mp4')")
+                    val seg = JSONObject()
+                    seg.put("b", b64)
+                    seg.put("m", "audio/mp4")
+                    synchronized(voiceLock) { voiceSegments.add(seg) }
                 } catch (ignored: Exception) {
                 }
             }
@@ -668,14 +728,14 @@ class MainActivity : Activity() {
 
     private fun bridgeStopRecorder() {
         if (!recording) {
-            js("onRecorderStopped()")
+            voiceStopped = true
             return
         }
         recording = false
         recHandler.removeCallbacks(rotateRunnable)
         recHandler.removeCallbacks(levelRunnable)
         finishSegment(push = true)
-        js("onRecorderStopped()")
+        voiceStopped = true
     }
 
     private fun bridgeCancelRecorder() {
@@ -684,21 +744,26 @@ class MainActivity : Activity() {
         recHandler.removeCallbacks(levelRunnable)
         finishSegment(push = false)
         voiceDir().listFiles()?.forEach { it.delete() }
-        js("onRecorderCancelled()")
+        synchronized(voiceLock) { voiceSegments.clear() }
+        voiceCancelled = true
     }
 
     // ==================== back button ====================
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        // Let the page handle it first: close an open sheet/settings, go
-        // back to the chat tab, or cancel a recording. Exit only when the
-        // page says it has nothing to handle.
-        if (::webView.isInitialized) {
+        // The app page lives in a sandboxed cross-origin iframe inside the
+        // Apps Script host page, so evaluateJavascript cannot call page
+        // functions directly. Dispatch a postMessage into the iframe: the
+        // page handles the press (close sheet/settings, back to the Write
+        // tab, cancel a recording) or calls HisabApp.exitApp() to close.
+        val url = if (::webView.isInitialized) webView.url else null
+        if (url != null && url.contains("script.google")) {
             webView.evaluateJavascript(
-                "window.hisabHandleBack ? String(hisabHandleBack()) : 'false'"
-            ) { result ->
-                if (result != "\"true\"") exitApp()
-            }
+                "(function(){try{var f=document.getElementById('sandboxFrame');" +
+                    "var t=(f&&f.contentWindow)?f.contentWindow:window;" +
+                    "t.postMessage('NH_BACK','*');}catch(e){}})()",
+                null
+            )
         } else {
             exitApp()
         }
